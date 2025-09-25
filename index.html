@@ -2,44 +2,133 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Flutter WASM (Threaded)</title>
+  <title>Robust WASM loader (dart2wasm-safe)</title>
+  <style>body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:18px}pre{background:#f6f8fa;padding:12px;border-radius:6px}</style>
 </head>
 <body>
-  <h1>Flutter WASM with Shared Memory</h1>
-  <pre id="log">Starting...\n</pre>
+  <h1>WASM loader (ensures importObject.dart2wasm is an object)</h1>
+  <p>Open DevTools & check console for detailed logs.</p>
+  <h3>Status</h3><pre id="status">starting...</pre>
+  <h3>Imports</h3><pre id="imports">none yet</pre>
+  <h3>Logs</h3><pre id="logs"></pre>
 
-  <script>
-    const log = (msg) => {
-      document.getElementById("log").textContent += msg + "\n";
-      console.log(msg);
-    };
+<script>
+const statusEl = id => document.getElementById('status').textContent = id;
+const importsEl = obj => document.getElementById('imports').textContent = JSON.stringify(obj, null, 2);
+const log = (s) => { document.getElementById('logs').textContent += s + "\n"; console.log(s); };
 
-    (async () => {
-      log("crossOriginIsolated = " + self.crossOriginIsolated);
+(async () => {
+  statusEl('checking crossOriginIsolated');
+  log('self.crossOriginIsolated = ' + String(self.crossOriginIsolated));
 
-      try {
-        const resp = await fetch("module.wasm");
-        if (!resp.ok) throw new Error("Fetch failed: " + resp.status);
+  try {
+    statusEl('fetching module.wasm');
+    const resp = await fetch('module.wasm');
+    if (!resp.ok) throw new Error('fetch failed: ' + resp.status + ' ' + resp.statusText);
 
-        const bytes = await resp.arrayBuffer();
-        const module = await WebAssembly.compile(bytes);
+    const bytes = await resp.arrayBuffer();
 
-        // Shared memory required
-        const memory = new WebAssembly.Memory({
-          initial: 256,   // adjust pages (256 * 64KiB = 16MB)
-          maximum: 1024,
-          shared: true
-        });
+    statusEl('compiling module to inspect imports');
+    const module = await WebAssembly.compile(bytes);
+    const imports = WebAssembly.Module.imports(module);
+    importsEl(imports);
+    log('Module.imports length: ' + imports.length);
 
-        const importObject = { ffi: { memory } };
+    statusEl('building robust importObject');
 
-        const { instance } = await WebAssembly.instantiate(module, importObject);
-        log("WASM loaded. Exports: " + Object.keys(instance.exports));
-      } catch (e) {
-        log("Error: " + e);
-        console.error(e);
+    // Create importObject and make sure each module name is a plain object
+    const importObject = Object.create(null); // null-prototype object
+    for (const imp of imports) {
+      if (!(imp.module in importObject)) {
+        // ensure plain object (not inherited) — satisfies Wasm runtime requirement
+        importObject[imp.module] = Object.create(null);
       }
-    })();
-  </script>
+    }
+
+    // Provide a shared memory if any import requires memory, and prefer to attach it to common modules (dart2wasm / ffi)
+    const DEFAULT_PAGES = 256; // 256 * 64KiB = ~16MB, adjust if needed
+    const MAX_PAGES = 1024;
+    // Create one shared memory instance to reuse
+    const sharedMemory = new WebAssembly.Memory({ initial: DEFAULT_PAGES, maximum: MAX_PAGES, shared: true });
+    log('created shared WebAssembly.Memory (shared=true) pages=' + DEFAULT_PAGES);
+
+    // Create one table if needed
+    let sharedTable = null;
+
+    // Fill placeholders for every import
+    for (const imp of imports) {
+      const m = imp.module;
+      const n = imp.name;
+      const k = imp.kind;
+
+      // Guarantee the module object exists (critical for errors like "module is not an object")
+      if (!(m in importObject) || importObject[m] === null) {
+        importObject[m] = Object.create(null);
+      }
+
+      // If import already set, skip to avoid overwriting (rare)
+      if (n in importObject[m]) continue;
+
+      if (k === 'memory') {
+        // assign the sharedMemory to imported memory names (this addresses shared vs non-shared mismatch)
+        importObject[m][n] = sharedMemory;
+        log(`Provided shared memory for ${m}.${n}`);
+      } else if (k === 'table') {
+        if (!sharedTable) sharedTable = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
+        importObject[m][n] = sharedTable;
+        log(`Provided table for ${m}.${n}`);
+      } else if (k === 'global') {
+        // default to i32 0
+        try {
+          importObject[m][n] = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
+          log(`Provided Global (i32) for ${m}.${n}`);
+        } catch (e) {
+          // Fallback to primitive zero if Global isn't available
+          importObject[m][n] = 0;
+          log(`Provided fallback global 0 for ${m}.${n}`);
+        }
+      } else if (k === 'function') {
+        // Generic placeholder: logs its calls and returns 0 (adjust if your module expects other return types)
+        importObject[m][n] = function(...args) {
+          log(`IMPORT CALL -> ${m}.${n}(${args.map(a => String(a)).join(', ')})`);
+          return 0;
+        };
+        log(`Provided function placeholder for ${m}.${n}`);
+      } else {
+        importObject[m][n] = 0;
+        log(`Provided fallback 0 for ${m}.${n} (kind=${k})`);
+      }
+    }
+
+    // VERY IMPORTANT DIAGNOSTIC: ensure dart2wasm is an object
+    if ('dart2wasm' in importObject) {
+      log('diagnostic: typeof importObject["dart2wasm"] = ' + typeof importObject['dart2wasm']);
+      log('diagnostic: keys = ' + Object.keys(importObject['dart2wasm']).join(', '));
+    } else {
+      log('diagnostic: importObject does NOT contain dart2wasm (module did not request it?)');
+    }
+
+    statusEl('instantiating module (compiled) with robust importObject...');
+    const result = await WebAssembly.instantiate(module, importObject);
+    const instance = result.instance || result;
+    statusEl('WASM instantiated ✅');
+    log('exports: ' + JSON.stringify(Object.keys(instance.exports)));
+
+    // attempt to call common entrypoints safely
+    if (instance.exports._start) {
+      try { instance.exports._start(); log('_start() called'); } catch(e) { log('calling _start failed: ' + e); }
+    } else if (instance.exports.main) {
+      try { instance.exports.main(); log('main() called'); } catch(e) { log('calling main failed: ' + e); }
+    } else {
+      log('no auto-call export (_start / main) found.');
+    }
+
+  } catch (err) {
+    statusEl('ERROR');
+    log('ERROR: ' + err);
+    console.error(err);
+  }
+})();
+</script>
 </body>
 </html>
