@@ -1,5 +1,5 @@
 [build]
-  publish = "build/web"  # or "." or "public"
+  publish = "."  # or "." or "public"
 
 # Headers can be set here too
 [[headers]]
