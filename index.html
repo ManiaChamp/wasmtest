@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WASM on GitHub Pages</title>
+</head>
+<body>
+  <h1>WebAssembly Demo (GitHub Pages)</h1>
+  <pre id="output">Loading...</pre>
+
+  <script>
+    async function loadWasm() {
+      try {
+        // fetch the wasm file (make sure module.wasm is in same folder as index.html)
+        const response = await fetch("module.wasm");
+
+        // Use instantiateStreaming if possible
+        if (WebAssembly.instantiateStreaming) {
+          const { instance } = await WebAssembly.instantiateStreaming(response, {});
+          document.getElementById("output").textContent = "WASM loaded via streaming ✅";
+          // call an exported function if available:
+          // console.log(instance.exports.myExportedFn());
+          return;
+        }
+
+        // fallback: arrayBuffer if MIME is wrong or browser doesn’t support streaming
+        const bytes = await response.arrayBuffer();
+        const { instance } = await WebAssembly.instantiate(bytes, {});
+        document.getElementById("output").textContent = "WASM loaded via arrayBuffer ✅";
+      } catch (err) {
+        document.getElementById("output").textContent = "Error loading WASM: " + err;
+        console.error(err);
+      }
+    }
+
+    loadWasm();
+  </script>
+</body>
+</html>
