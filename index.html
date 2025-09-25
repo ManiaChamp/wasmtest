@@ -1,94 +1,21 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"/><title>WASM Mutability Fix Loader</title>
-<style>body{font-family:system-ui;padding:12px}pre{background:#f3f4f6;padding:10px;border-radius:6px}</style>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Flutter WASM App</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 </head>
 <body>
-  <h3>WASM mutability-aware loader</h3>
-  <pre id="out">starting...\n</pre>
-<script>
-const outEl = document.getElementById('out');
-const log = (s) => { outEl.textContent += s + '\n'; console.log(s); };
+  <noscript>This app requires JavaScript.</noscript>
 
-(async () => {
-  try {
-    log('Fetching module.wasm...');
-    const r = await fetch('module.wasm');
-    if (!r.ok) throw new Error('Fetch failed: ' + r.status);
-    const bytes = await r.arrayBuffer();
-    const module = await WebAssembly.compile(bytes);
-    const imports = WebAssembly.Module.imports(module);
-    log('Module.imports (sample): ' + JSON.stringify(imports.slice(0,20), null, 2));
+  <!-- Option A: preferred — static import as a module -->
+  <script type="module" src="./main.dart.mjs"></script>
 
-    // Template importObject with placeholders
-    const importObjectTemplate = {};
-    for (const imp of imports) {
-      if (!importObjectTemplate[imp.module]) importObjectTemplate[imp.module] = {};
-      if (imp.kind === 'function') {
-        importObjectTemplate[imp.module][imp.name] = (...args) => { log(`IMPORT ${imp.module}.${imp.name}(${args})`); return 0; };
-      } else if (imp.kind === 'memory') {
-        try {
-          importObjectTemplate[imp.module][imp.name] = new WebAssembly.Memory({ initial: 256, maximum: 1024, shared: true });
-        } catch(e) {
-          importObjectTemplate[imp.module][imp.name] = new WebAssembly.Memory({ initial: 256 });
-        }
-      } else if (imp.kind === 'table') {
-        importObjectTemplate[imp.module][imp.name] = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
-      }
-    }
-
-    const globalSlots = imports.filter(i => i.kind === 'global').map(i => ({module:i.module, name:i.name}));
-
-    const types = ['i32','i64','f32','f64'];
-    const mutabilities = [false, true]; // try immutable first, then mutable
-
-    const cloneTemplate = (tmpl) => {
-      const obj = {};
-      for (const key of Object.keys(tmpl)) {
-        obj[key] = Object.assign(Object.create(null), tmpl[key]);
-      }
-      return obj;
-    };
-
-    const attemptInstantiate = async () => {
-      if (globalSlots.length === 0) {
-        const io = cloneTemplate(importObjectTemplate);
-        return WebAssembly.instantiate(module, io);
-      }
-
-      for (const t of types) {
-        for (const mflag of mutabilities) {
-          const io = cloneTemplate(importObjectTemplate);
-          for (const slot of globalSlots) {
-            let initVal = (t === 'i64') ? BigInt(0) : 0;
-            if (t === 'f32' || t === 'f64') initVal = 0.0;
-            try {
-              io[slot.module][slot.name] = new WebAssembly.Global({ value: t, mutable: mflag }, initVal);
-            } catch (e) {
-              log(`Failed creating Global for ${slot.module}.${slot.name} type=${t}, mutable=${mflag}: ${e}`);
-              io[slot.module][slot.name] = 0; // fallback
-            }
-          }
-          try {
-            log(`Trying instantiate with globals type=${t}, mutable=${mflag}`);
-            const res = await WebAssembly.instantiate(module, io);
-            log(`SUCCESS with type=${t}, mutable=${mflag}`);
-            return res;
-          } catch (err) {
-            log(`FAILED with type=${t}, mutable=${mflag}: ${err}`);
-          }
-        }
-      }
-      throw new Error('All global type/mutability attempts failed');
-    };
-
-    const result = await attemptInstantiate();
-    log('WASM instantiated; exports: ' + JSON.stringify(Object.keys(result.instance.exports)));
-  } catch (err) {
-    log('FINAL ERROR: ' + err);
-    console.error(err);
-  }
-})();
-</script>
+  <!-- Option B: dynamic import (if you prefer) -->
+  <!--
+  <script type="module">
+    import('./main.dart.mjs').catch(e => console.error('Failed loading main.dart.mjs', e));
+  </script>
+  -->
 </body>
 </html>
