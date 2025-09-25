@@ -1,128 +1,104 @@
 <!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>WASM Loader + Import Inspector</title>
-  <style>body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:20px}pre{background:#f6f8fa;padding:12px;border-radius:6px}</style>
-</head>
+<html>
+<head><meta charset="utf-8"><title>WASM loader - provide Memory</title></head>
 <body>
-  <h1>WASM Loader + Import Inspector</h1>
-  <p>This page will load <code>module.wasm</code>, inspect its imports, auto-provide placeholders, and try to instantiate it.</p>
-
-  <h3>Status</h3>
-  <pre id="status">Starting...</pre>
-
-  <h3>Module imports (inspected)</h3>
-  <pre id="imports">(none yet)</pre>
-
-  <h3>Console / Logs</h3>
-  <pre id="logs"></pre>
-
+  <h1>WASM loader (auto-provide Memory for imported modules)</h1>
+  <pre id="out">starting...</pre>
   <script>
-    const status = id => document.getElementById('status').textContent = id;
-    const importsEl = obj => document.getElementById('imports').textContent = JSON.stringify(obj, null, 2);
-    const log = msg => {
-      const el = document.getElementById('logs');
-      el.textContent += msg + "\n";
-      console.log(msg);
-    };
+    const outEl = document.getElementById('out');
+    const out = txt => { outEl.textContent += txt + "\n"; console.log(txt); };
 
     (async () => {
-      status('Fetching module.wasm...');
       try {
-        const r = await fetch('module.wasm');
-        if (!r.ok) throw new Error('Fetch failed: ' + r.status + ' ' + r.statusText);
+        out('fetching module.wasm...');
+        const resp = await fetch('module.wasm');
+        if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
+        const bytes = await resp.arrayBuffer();
 
-        const bytes = await r.arrayBuffer();
-        status('Compiling module to inspect imports...');
+        out('compiling module...');
         const module = await WebAssembly.compile(bytes);
-
         const imports = WebAssembly.Module.imports(module);
-        importsEl(imports);
-        status('Preparing importObject from inspection...');
+        out('Module.imports: ' + JSON.stringify(imports.slice(0,50), null, 2));
+        if (imports.length > 50) out(`...and ${imports.length - 50} more imports omitted in log`);
 
-        // We'll reuse a single memory/table if needed
-        const shared = {
-          memory: null,
-          table: null
-        };
+        // Decide default memory pages (64KiB per page). Adjust if needed.
+        const DEFAULT_PAGES = 256; // 256 * 64KiB = 16MB
+        const MAX_PAGES = 1024;    // optional maximum
 
+        // We'll create shared Memory/Table objects per imported name.
         const importObject = {};
 
-        // Prepare placeholders for used modules
+        // Pre-scan to detect any imports of kind 'memory' (gives module & name)
         for (const imp of imports) {
-          if (!importObject[imp.module]) importObject[imp.module] = {};
+          if (!(imp.module in importObject)) importObject[imp.module] = {};
         }
 
-        // Provide placeholders according to kind
+        // Provide Memory/Table placeholders where requested
         for (const imp of imports) {
-          const m = imp.module;
-          const n = imp.name;
-          const k = imp.kind;
-
+          const m = imp.module, n = imp.name, k = imp.kind;
           if (k === 'memory') {
-            if (!shared.memory) {
-              // default 256 pages ~ 16MB; adjust if your wasm needs more/less
-              shared.memory = new WebAssembly.Memory({ initial: 256, maximum: 1024 }).catch?.(() => new WebAssembly.Memory({ initial: 256 }));
+            // Provide a WebAssembly.Memory object (must be one)
+            // If a module imports multiple memory names, give them separate Memory objects.
+            if (!importObject[m][n]) {
+              out(`Providing WebAssembly.Memory for import ${m}.${n} (pages=${DEFAULT_PAGES})`);
+              importObject[m][n] = new WebAssembly.Memory({ initial: DEFAULT_PAGES, maximum: MAX_PAGES });
             }
-            importObject[m][n] = shared.memory;
-            log(`Provided memory placeholder for ${m}.${n}`);
           } else if (k === 'table') {
-            if (!shared.table) {
-              shared.table = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
+            if (!importObject[m][n]) {
+              out(`Providing WebAssembly.Table for import ${m}.${n}`);
+              importObject[m][n] = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
             }
-            importObject[m][n] = shared.table;
-            log(`Provided table placeholder for ${m}.${n}`);
           } else if (k === 'global') {
-            importObject[m][n] = 0;
-            log(`Provided global placeholder for ${m}.${n}`);
+            if (!importObject[m][n] && typeof WebAssembly.Global !== 'undefined') {
+              out(`Providing WebAssembly.Global (i32) for import ${m}.${n}`);
+              importObject[m][n] = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
+            } else {
+              importObject[m][n] = 0;
+            }
           } else if (k === 'function') {
-            // Generic no-op function that logs calls and returns 0 where needed
-            importObject[m][n] = (...args) => {
-              log(`Called import ${m}.${n} with args: ${JSON.stringify(args)}`);
-              // return 0 by default; toolchains may expect specific returns
-              return 0;
-            };
-            log(`Provided function placeholder for ${m}.${n}`);
+            if (!importObject[m][n]) {
+              // Provide a no-op that logs calls. Adjust to return expected types if needed.
+              importObject[m][n] = function(...args) {
+                out(`called import ${m}.${n} with args: ${JSON.stringify(args)}`);
+                return 0;
+              };
+            }
           } else {
-            // fallback
             importObject[m][n] = 0;
-            log(`Provided fallback placeholder for ${m}.${n} (kind=${k})`);
           }
         }
 
-        status('Instantiating module with placeholder imports (may still throw runtime errors)...');
-        const instanceResult = await WebAssembly.instantiate(module, importObject);
-        const instance = instanceResult.instance || instanceResult;
-
-        status('WASM instantiated ✅');
-        log('Exports: ' + JSON.stringify(Object.keys(instance.exports)));
-
-        // If your wasm exports a function named "_start" or "main", try calling it safely
-        if (instance.exports._start) {
-          try {
-            log('Calling exported function: _start()');
-            const res = instance.exports._start();
-            log('_start() returned: ' + res);
-          } catch (e) {
-            log('Calling _start() failed: ' + e);
-          }
-        } else if (instance.exports.main) {
-          try {
-            log('Calling exported function: main()');
-            const res = instance.exports.main();
-            log('main() returned: ' + res);
-          } catch (e) {
-            log('Calling main() failed: ' + e);
+        // DIAGNOSTIC: show whether ffi.memory exists and is a Memory object
+        if (importObject.ffi) {
+          out('importObject.ffi present. keys: ' + Object.keys(importObject.ffi).join(', '));
+          if (importObject.ffi.memory) {
+            out('importObject.ffi.memory instanceof WebAssembly.Memory? ' + (importObject.ffi.memory instanceof WebAssembly.Memory));
+            // show current size (pages) and byteLength
+            try {
+              out('ffi.memory.buffer.byteLength = ' + importObject.ffi.memory.buffer.byteLength);
+              out('ffi.memory.grow? ' + (typeof importObject.ffi.memory.grow === 'function'));
+            } catch(e) { out('could not read ffi.memory.buffer: ' + e); }
+          } else {
+            out('importObject.ffi.memory not present.');
           }
         } else {
-          log('No _start/main export to auto-call; inspect exports manually in console or instance.exports');
+          out('importObject has no ffi module.');
         }
 
-        status('Done — check logs for details.');
+        out('instantiating module...');
+        const instanceResult = await WebAssembly.instantiate(module, importObject);
+        const instance = instanceResult.instance || instanceResult;
+        out('WASM instantiated OK');
+        out('exports: ' + JSON.stringify(Object.keys(instance.exports)));
+
+        // Optional: call common entrypoints
+        try {
+          if (instance.exports._start) { out('calling _start()'); instance.exports._start(); out('_start() returned'); }
+          else if (instance.exports.main)  { out('calling main()'); instance.exports.main(); out('main() returned'); }
+        } catch (e) { out('calling export failed: ' + e); }
+
       } catch (err) {
-        status('Error loading WASM');
-        log('Error: ' + err);
+        out('ERROR: ' + err);
         console.error(err);
       }
     })();
