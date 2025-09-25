@@ -1,39 +1,131 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>WASM on GitHub Pages</title>
+  <meta charset="utf-8" />
+  <title>WASM Loader + Import Inspector</title>
+  <style>body{font-family:system-ui,Segoe UI,Roboto,Arial;padding:20px}pre{background:#f6f8fa;padding:12px;border-radius:6px}</style>
 </head>
 <body>
-  <h1>WebAssembly Demo (GitHub Pages)</h1>
-  <pre id="output">Loading...</pre>
+  <h1>WASM Loader + Import Inspector</h1>
+  <p>This page will load <code>module.wasm</code>, inspect its imports, auto-provide placeholders, and try to instantiate it.</p>
+
+  <h3>Status</h3>
+  <pre id="status">Starting...</pre>
+
+  <h3>Module imports (inspected)</h3>
+  <pre id="imports">(none yet)</pre>
+
+  <h3>Console / Logs</h3>
+  <pre id="logs"></pre>
 
   <script>
-    async function loadWasm() {
-      try {
-        // fetch the wasm file (make sure module.wasm is in same folder as index.html)
-        const response = await fetch("module.wasm");
+    const status = id => document.getElementById('status').textContent = id;
+    const importsEl = obj => document.getElementById('imports').textContent = JSON.stringify(obj, null, 2);
+    const log = msg => {
+      const el = document.getElementById('logs');
+      el.textContent += msg + "\n";
+      console.log(msg);
+    };
 
-        // Use instantiateStreaming if possible
-        if (WebAssembly.instantiateStreaming) {
-          const { instance } = await WebAssembly.instantiateStreaming(response, {});
-          document.getElementById("output").textContent = "WASM loaded via streaming ✅";
-          // call an exported function if available:
-          // console.log(instance.exports.myExportedFn());
-          return;
+    (async () => {
+      status('Fetching module.wasm...');
+      try {
+        const r = await fetch('module.wasm');
+        if (!r.ok) throw new Error('Fetch failed: ' + r.status + ' ' + r.statusText);
+
+        const bytes = await r.arrayBuffer();
+        status('Compiling module to inspect imports...');
+        const module = await WebAssembly.compile(bytes);
+
+        const imports = WebAssembly.Module.imports(module);
+        importsEl(imports);
+        status('Preparing importObject from inspection...');
+
+        // We'll reuse a single memory/table if needed
+        const shared = {
+          memory: null,
+          table: null
+        };
+
+        const importObject = {};
+
+        // Prepare placeholders for used modules
+        for (const imp of imports) {
+          if (!importObject[imp.module]) importObject[imp.module] = {};
         }
 
-        // fallback: arrayBuffer if MIME is wrong or browser doesn’t support streaming
-        const bytes = await response.arrayBuffer();
-        const { instance } = await WebAssembly.instantiate(bytes, {});
-        document.getElementById("output").textContent = "WASM loaded via arrayBuffer ✅";
+        // Provide placeholders according to kind
+        for (const imp of imports) {
+          const m = imp.module;
+          const n = imp.name;
+          const k = imp.kind;
+
+          if (k === 'memory') {
+            if (!shared.memory) {
+              // default 256 pages ~ 16MB; adjust if your wasm needs more/less
+              shared.memory = new WebAssembly.Memory({ initial: 256, maximum: 1024 }).catch?.(() => new WebAssembly.Memory({ initial: 256 }));
+            }
+            importObject[m][n] = shared.memory;
+            log(`Provided memory placeholder for ${m}.${n}`);
+          } else if (k === 'table') {
+            if (!shared.table) {
+              shared.table = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
+            }
+            importObject[m][n] = shared.table;
+            log(`Provided table placeholder for ${m}.${n}`);
+          } else if (k === 'global') {
+            importObject[m][n] = 0;
+            log(`Provided global placeholder for ${m}.${n}`);
+          } else if (k === 'function') {
+            // Generic no-op function that logs calls and returns 0 where needed
+            importObject[m][n] = (...args) => {
+              log(`Called import ${m}.${n} with args: ${JSON.stringify(args)}`);
+              // return 0 by default; toolchains may expect specific returns
+              return 0;
+            };
+            log(`Provided function placeholder for ${m}.${n}`);
+          } else {
+            // fallback
+            importObject[m][n] = 0;
+            log(`Provided fallback placeholder for ${m}.${n} (kind=${k})`);
+          }
+        }
+
+        status('Instantiating module with placeholder imports (may still throw runtime errors)...');
+        const instanceResult = await WebAssembly.instantiate(module, importObject);
+        const instance = instanceResult.instance || instanceResult;
+
+        status('WASM instantiated ✅');
+        log('Exports: ' + JSON.stringify(Object.keys(instance.exports)));
+
+        // If your wasm exports a function named "_start" or "main", try calling it safely
+        if (instance.exports._start) {
+          try {
+            log('Calling exported function: _start()');
+            const res = instance.exports._start();
+            log('_start() returned: ' + res);
+          } catch (e) {
+            log('Calling _start() failed: ' + e);
+          }
+        } else if (instance.exports.main) {
+          try {
+            log('Calling exported function: main()');
+            const res = instance.exports.main();
+            log('main() returned: ' + res);
+          } catch (e) {
+            log('Calling main() failed: ' + e);
+          }
+        } else {
+          log('No _start/main export to auto-call; inspect exports manually in console or instance.exports');
+        }
+
+        status('Done — check logs for details.');
       } catch (err) {
-        document.getElementById("output").textContent = "Error loading WASM: " + err;
+        status('Error loading WASM');
+        log('Error: ' + err);
         console.error(err);
       }
-    }
-
-    loadWasm();
+    })();
   </script>
 </body>
 </html>
