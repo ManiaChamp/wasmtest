@@ -1,7 +1,77 @@
 <!doctype html>
-<html>
-  <head><meta charset="utf-8"/></head>
-  <body>
-    <script type="module" src="./main.dart.mjs"></script>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Debug Flutter WASM App</title>
+</head>
+<body>
+  <noscript>Please enable JavaScript.</noscript>
+
+  <!-- 1) Unregister service workers so they can't serve stale files -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        if (!regs.length) console.log('No service workers registered.');
+        regs.forEach(reg => {
+          console.log('Unregistering service worker:', reg.scope);
+          reg.unregister().then(ok => console.log('unregistered?', ok, reg.scope));
+        });
+      }).catch(e => console.warn('SW unregister error', e));
+    }
+  </script>
+
+  <!-- 2) Global error catching (prints full info) -->
+  <script>
+    window.addEventListener('error', event => {
+      // event.error may be an Error object with stack
+      console.error('WINDOW ERROR captured:', event.message || event.error, event.error && event.error.stack ? event.error.stack : event);
+      // keep default handling too
+    });
+    window.addEventListener('unhandledrejection', event => {
+      console.error('UNHANDLED PROMISE REJECTION:', event.reason, event.reason && event.reason.stack ? event.reason.stack : event.reason);
+    });
+    // helper to print the console visually
+    console.log('Debug bootstrap loaded — will now import main.dart.mjs');
+  </script>
+
+  <!-- 3) Load Flutter WASM bootstrap and notify when loaded -->
+  <script type="module">
+    (async () => {
+      try {
+        import('./main.dart.mjs')
+          .then(mod => {
+            console.log('main.dart.mjs loaded (module import resolved). exports:', Object.keys(mod || {}));
+          })
+          .catch(e => {
+            console.error('Failed to import main.dart.mjs (module import failed):', e, e && e.stack);
+          });
+      } catch (e) {
+        console.error('Error while importing main.dart.mjs:', e, e && e.stack);
+      }
+
+      // 4) Monitor DOM for Flutter mounting nodes (helpful heuristics)
+      function checkDOM() {
+        const bodyChildren = document.body.children.length;
+        console.log('Body children count:', bodyChildren);
+        const flutterNodes = Array.from(document.querySelectorAll('flt-platform-view, flt-glass-pane, #flt-platform-view, .flt-scene, canvas'))
+          .map(n => ({ nodeName: n.nodeName, id: n.id, class: n.className }));
+        console.log('Detected Flutter-ish nodes (sample):', flutterNodes.slice(0,10));
+      }
+
+      // check periodically for a short time
+      checkDOM();
+      const t0 = setInterval(checkDOM, 800);
+      setTimeout(() => { clearInterval(t0); console.log('DOM monitoring finished (timeout).'); }, 8000);
+
+      // Also dump recent resource fetches (helps find inlined vs separate wasm)
+      setTimeout(() => {
+        try {
+          const resources = performance.getEntriesByType('resource').slice(-40).map(e => ({name: e.name, initiator: e.initiatorType, size: e.transferSize}));
+          console.log('Recent network resources (last 40):', resources);
+        } catch (e) { console.warn('Could not read performance entries', e); }
+      }, 1200);
+    })();
+  </script>
+</body>
 </html>
