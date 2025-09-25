@@ -1,105 +1,43 @@
 <!doctype html>
-<html>
-<head><meta charset="utf-8"><title>WASM loader - provide Memory</title></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Flutter WASM (Threaded)</title>
+</head>
 <body>
-  <h1>WASM loader (auto-provide Memory for imported modules)</h1>
-  <pre id="out">starting...</pre>
+  <h1>Flutter WASM with Shared Memory</h1>
+  <pre id="log">Starting...\n</pre>
+
   <script>
-    const outEl = document.getElementById('out');
-    const out = txt => { outEl.textContent += txt + "\n"; console.log(txt); };
+    const log = (msg) => {
+      document.getElementById("log").textContent += msg + "\n";
+      console.log(msg);
+    };
 
     (async () => {
+      log("crossOriginIsolated = " + self.crossOriginIsolated);
+
       try {
-        out('fetching module.wasm...');
-        const resp = await fetch('module.wasm');
-        if (!resp.ok) throw new Error('fetch failed: ' + resp.status);
+        const resp = await fetch("module.wasm");
+        if (!resp.ok) throw new Error("Fetch failed: " + resp.status);
+
         const bytes = await resp.arrayBuffer();
-
-        out('compiling module...');
         const module = await WebAssembly.compile(bytes);
-        const imports = WebAssembly.Module.imports(module);
-        out('Module.imports: ' + JSON.stringify(imports.slice(0,50), null, 2));
-        if (imports.length > 50) out(`...and ${imports.length - 50} more imports omitted in log`);
 
-        // Decide default memory pages (64KiB per page). Adjust if needed.
-        const DEFAULT_PAGES = 256; // 256 * 64KiB = 16MB
-        const MAX_PAGES = 1024;    // optional maximum
+        // Shared memory required
+        const memory = new WebAssembly.Memory({
+          initial: 256,   // adjust pages (256 * 64KiB = 16MB)
+          maximum: 1024,
+          shared: true
+        });
 
-        // We'll create shared Memory/Table objects per imported name.
-        const importObject = {};
+        const importObject = { ffi: { memory } };
 
-        // Pre-scan to detect any imports of kind 'memory' (gives module & name)
-        for (const imp of imports) {
-          if (!(imp.module in importObject)) importObject[imp.module] = {};
-        }
-
-        // Provide Memory/Table placeholders where requested
-        for (const imp of imports) {
-          const m = imp.module, n = imp.name, k = imp.kind;
-          if (k === 'memory') {
-            // Provide a WebAssembly.Memory object (must be one)
-            // If a module imports multiple memory names, give them separate Memory objects.
-            if (!importObject[m][n]) {
-              out(`Providing WebAssembly.Memory for import ${m}.${n} (pages=${DEFAULT_PAGES})`);
-              importObject[m][n] = new WebAssembly.Memory({ initial: DEFAULT_PAGES, maximum: MAX_PAGES });
-            }
-          } else if (k === 'table') {
-            if (!importObject[m][n]) {
-              out(`Providing WebAssembly.Table for import ${m}.${n}`);
-              importObject[m][n] = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
-            }
-          } else if (k === 'global') {
-            if (!importObject[m][n] && typeof WebAssembly.Global !== 'undefined') {
-              out(`Providing WebAssembly.Global (i32) for import ${m}.${n}`);
-              importObject[m][n] = new WebAssembly.Global({ value: 'i32', mutable: true }, 0);
-            } else {
-              importObject[m][n] = 0;
-            }
-          } else if (k === 'function') {
-            if (!importObject[m][n]) {
-              // Provide a no-op that logs calls. Adjust to return expected types if needed.
-              importObject[m][n] = function(...args) {
-                out(`called import ${m}.${n} with args: ${JSON.stringify(args)}`);
-                return 0;
-              };
-            }
-          } else {
-            importObject[m][n] = 0;
-          }
-        }
-
-        // DIAGNOSTIC: show whether ffi.memory exists and is a Memory object
-        if (importObject.ffi) {
-          out('importObject.ffi present. keys: ' + Object.keys(importObject.ffi).join(', '));
-          if (importObject.ffi.memory) {
-            out('importObject.ffi.memory instanceof WebAssembly.Memory? ' + (importObject.ffi.memory instanceof WebAssembly.Memory));
-            // show current size (pages) and byteLength
-            try {
-              out('ffi.memory.buffer.byteLength = ' + importObject.ffi.memory.buffer.byteLength);
-              out('ffi.memory.grow? ' + (typeof importObject.ffi.memory.grow === 'function'));
-            } catch(e) { out('could not read ffi.memory.buffer: ' + e); }
-          } else {
-            out('importObject.ffi.memory not present.');
-          }
-        } else {
-          out('importObject has no ffi module.');
-        }
-
-        out('instantiating module...');
-        const instanceResult = await WebAssembly.instantiate(module, importObject);
-        const instance = instanceResult.instance || instanceResult;
-        out('WASM instantiated OK');
-        out('exports: ' + JSON.stringify(Object.keys(instance.exports)));
-
-        // Optional: call common entrypoints
-        try {
-          if (instance.exports._start) { out('calling _start()'); instance.exports._start(); out('_start() returned'); }
-          else if (instance.exports.main)  { out('calling main()'); instance.exports.main(); out('main() returned'); }
-        } catch (e) { out('calling export failed: ' + e); }
-
-      } catch (err) {
-        out('ERROR: ' + err);
-        console.error(err);
+        const { instance } = await WebAssembly.instantiate(module, importObject);
+        log("WASM loaded. Exports: " + Object.keys(instance.exports));
+      } catch (e) {
+        log("Error: " + e);
+        console.error(e);
       }
     })();
   </script>
