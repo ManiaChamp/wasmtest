@@ -18,42 +18,30 @@ const log = (s) => { outEl.textContent += s + '\n'; console.log(s); };
     const bytes = await r.arrayBuffer();
     const module = await WebAssembly.compile(bytes);
     const imports = WebAssembly.Module.imports(module);
-    log('Module.imports (sample): ' + JSON.stringify(imports.slice(0,40), null, 2));
-    // collect module names
+    log('Module.imports (sample): ' + JSON.stringify(imports.slice(0,20), null, 2));
+
+    // Template importObject with placeholders
     const importObjectTemplate = {};
     for (const imp of imports) {
       if (!importObjectTemplate[imp.module]) importObjectTemplate[imp.module] = {};
-    }
-
-    // placeholders for functions/tables/memory/globals (we will iterate globals specially)
-    for (const imp of imports) {
-      const m = imp.module, n = imp.name, k = imp.kind;
-      if (k === 'function') {
-        importObjectTemplate[m][n] = (...args) => { log(`IMPORT CALL ${m}.${n}(${args.join(',')})`); return 0; };
-      } else if (k === 'memory') {
-        // provide shared memory if crossOriginIsolated probably available; otherwise non-shared
+      if (imp.kind === 'function') {
+        importObjectTemplate[imp.module][imp.name] = (...args) => { log(`IMPORT ${imp.module}.${imp.name}(${args})`); return 0; };
+      } else if (imp.kind === 'memory') {
         try {
-          importObjectTemplate[m][n] = new WebAssembly.Memory({ initial: 256, maximum: 1024, shared: true });
+          importObjectTemplate[imp.module][imp.name] = new WebAssembly.Memory({ initial: 256, maximum: 1024, shared: true });
         } catch(e) {
-          importObjectTemplate[m][n] = new WebAssembly.Memory({ initial: 256 });
+          importObjectTemplate[imp.module][imp.name] = new WebAssembly.Memory({ initial: 256 });
         }
-      } else if (k === 'table') {
-        importObjectTemplate[m][n] = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
-      } else if (k === 'global') {
-        // leave globals to be filled by the mutability/type trial logic below
-      } else {
-        importObjectTemplate[m][n] = 0;
+      } else if (imp.kind === 'table') {
+        importObjectTemplate[imp.module][imp.name] = new WebAssembly.Table({ initial: 0, element: 'anyfunc' });
       }
     }
 
-    // Build list of global slots to attempt to fill: [{module, name}]
     const globalSlots = imports.filter(i => i.kind === 'global').map(i => ({module:i.module, name:i.name}));
 
-    // Type candidates & mutability candidates to attempt (order chosen heuristically)
     const types = ['i32','i64','f32','f64'];
     const mutabilities = [false, true]; // try immutable first, then mutable
 
-    // helper to deep clone template
     const cloneTemplate = (tmpl) => {
       const obj = {};
       for (const key of Object.keys(tmpl)) {
@@ -62,74 +50,40 @@ const log = (s) => { outEl.textContent += s + '\n'; console.log(s); };
       return obj;
     };
 
-    // Try instantiation with different global configs
     const attemptInstantiate = async () => {
-      // If no globals required, just instantiate directly
       if (globalSlots.length === 0) {
         const io = cloneTemplate(importObjectTemplate);
-        log('No imported globals required; attempting instantiate with simple imports...');
         return WebAssembly.instantiate(module, io);
       }
 
-      // Iterate combinations (for performance we try mutability=false first then true for each type)
-      for (const slot of globalSlots) {
-        log(`Global required: ${slot.module}.${slot.name}`);
-      }
-
-      // We'll try all permutations: for each global slot we will try types x mutabilities combinations.
-      // To keep attempts manageable, we assign same trial order to all globals (cartesian product).
-      // We'll generate combinations by iterating types and mutabilities per slot in nested loops.
-      // For simplicity we do a breadth-first style: try all globals with type=i32,m=false; if fails,
-      // try all with type=i32,m=true; then i64,false; etc. This often solves mutability mismatch quickly.
       for (const t of types) {
         for (const mflag of mutabilities) {
-          const attemptIo = cloneTemplate(importObjectTemplate);
+          const io = cloneTemplate(importObjectTemplate);
           for (const slot of globalSlots) {
+            let initVal = (t === 'i64') ? BigInt(0) : 0;
+            if (t === 'f32' || t === 'f64') initVal = 0.0;
             try {
-              // create WebAssembly.Global for this type/mutability
-              // initial value 0 (numeric-zero). For f32/f64 use 0.0.
-              let initVal = 0;
-              if (t === 'f32' || t === 'f64') initVal = 0.0;
-              try {
-                attemptIo[slot.module][slot.name] = new WebAssembly.Global({ value: t, mutable: mflag }, initVal);
-              } catch (e) {
-                // Some environments may not accept i64 Global in JS (BigInt required)
-                if (t === 'i64') {
-                  // Use BigInt zero if supported
-                  try {
-                    attemptIo[slot.module][slot.name] = new WebAssembly.Global({ value: 'i64', mutable: mflag }, BigInt(0));
-                  } catch(err) {
-                    log(`Could not create i64 global (env limitation): ${err}`);
-                    // fall back to 0 (may fail on instantiate)
-                    attemptIo[slot.module][slot.name] = 0;
-                  }
-                } else {
-                  log(`Could not create Global for ${slot.module}.${slot.name} type=${t} mutable=${mflag}: ${e}`);
-                  attemptIo[slot.module][slot.name] = 0;
-                }
-              }
+              io[slot.module][slot.name] = new WebAssembly.Global({ value: t, mutable: mflag }, initVal);
+            } catch (e) {
+              log(`Failed creating Global for ${slot.module}.${slot.name} type=${t}, mutable=${mflag}: ${e}`);
+              io[slot.module][slot.name] = 0; // fallback
+            }
           }
-          // Attempt instantiate
           try {
-            log(`Attempting instantiate with type=${t} mutable=${mflag} for all globals...`);
-            const res = await WebAssembly.instantiate(module, attemptIo);
-            log(`Instantiate succeeded with type=${t} mutable=${mflag}`);
+            log(`Trying instantiate with globals type=${t}, mutable=${mflag}`);
+            const res = await WebAssembly.instantiate(module, io);
+            log(`SUCCESS with type=${t}, mutable=${mflag}`);
             return res;
           } catch (err) {
-            // If LinkError mentions mutability or type mismatch, continue trying other combos
-            log(`Instantiate failed with type=${t} mutable=${mflag}: ${err}`);
-            // continue to next combination
+            log(`FAILED with type=${t}, mutable=${mflag}: ${err}`);
           }
         }
       }
-
-      // If we exit loops, all combinations failed
-      throw new Error('All global type/mutability attempts failed. Inspect Module.imports and provide correct global descriptors.');
+      throw new Error('All global type/mutability attempts failed');
     };
 
-    // Run attempts
     const result = await attemptInstantiate();
-    log('WASM instantiated OK; exports: ' + JSON.stringify(Object.keys(result.instance.exports || result.exports || {})));
+    log('WASM instantiated; exports: ' + JSON.stringify(Object.keys(result.instance.exports)));
   } catch (err) {
     log('FINAL ERROR: ' + err);
     console.error(err);
